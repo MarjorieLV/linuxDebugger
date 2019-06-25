@@ -11,6 +11,7 @@
 #include "breakpoint.hpp"
 #include "registers.hpp"
 #include "ptrace.hpp"
+#include "symbol.hpp"
 
 class Debugger {
 public :
@@ -22,6 +23,7 @@ public :
 private :
 
     enum class CMD {
+        BACKTRACE,
         BREAK,
         CONTINUE,
         DUMP,
@@ -31,19 +33,22 @@ private :
         READ,
         REGISTER,
         STEP,
+        SYMBOL,
         UNKNOWN,
+        VARIABLES,
         WRITE,
     };
 
-    Ptrace _ptrace;
     Register _register;
+    Ptrace _ptrace;
     std::string const& _programName;
     pid_t _processId;
     dwarf::dwarf _dwarf;
     elf::elf _elf;
-    uint64_t const retAddOffset = 8;
+    uint64_t const _retAddOffset = 8;
     std::unordered_map<std::string, CMD> _validCmd
         {
+            {"bt", CMD::BACKTRACE},
             {"b", CMD::BREAK},
             {"c", CMD::CONTINUE},
             {"dump", CMD::DUMP},
@@ -53,6 +58,8 @@ private :
             {"read", CMD::READ},
             {"reg", CMD::REGISTER},
             {"s", CMD::STEP},
+            {"symbol", CMD::SYMBOL},
+            {"variables", CMD::VARIABLES},
             {"write", CMD::WRITE},
         };
     std::unordered_map<std::intptr_t, Breakpoint> _breakpointsByAddress;
@@ -66,11 +73,16 @@ private :
     void     _handleMemoryCommand(std::vector<std::string> args);
     void     _handleRegisterCommand(std::vector<std::string> args);
     void     _handleSigtrap(siginfo_t info);
+    void     _handleSymbol(std::vector<std::string> args);
     CMD      _isCmd(std::string const & cmd);
+    void     _printBacktrace();
     void     _printSource(std::string const& fileName,unsigned int line,unsigned int linesContext=2);
     uint64_t _readMemory(uint64_t address);
+    void     _readVariables();
     void     _removeBreakpoint(std::intptr_t address);
     void     _setBreakpoint(std::intptr_t address);
+    void     _setBreakpointAtFunc(std::string const & name);
+    void     _setBreakpointAtSourceLine(std::string const & file, unsigned int line);
     void     _setPc(uint64_t pc);
     void     _singleStep();
     void     _singleStepWithBreakpointCheck();
@@ -79,7 +91,7 @@ private :
     void     _stepOver();
     void     _waitForSignal();
     void     _writeMemory(uint64_t address, uint64_t value);
-
+    std::vector<Symbol> _findSymbols(std::string const & name);
     dwarf::die                  _getFuncFromPC(uint64_t pc);
     dwarf::line_table::iterator _getLineEntryFromPc(uint64_t pc);
 };

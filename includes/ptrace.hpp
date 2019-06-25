@@ -10,18 +10,26 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <signal.h>
+#include "dwarf++.hh"
+#include "registers.hpp"
 
-class Ptrace {
+class Ptrace : public dwarf::expr_context
+{
 public :
 
-    long getData(pid_t pID, uint64_t address);
-    bool setData(pid_t pID, uint64_t address, uint64_t value);
-    bool continueExec(pid_t pID);
-    bool singleStep(pid_t pID);
-    siginfo_t getSignalInfo(pid_t pID);
-
+    Ptrace(pid_t pID, Register const & reg);
+    long      getData(uint64_t address);
+    bool      setData(uint64_t address, uint64_t value);
+    bool      continueExec();
+    bool      singleStep();
+    siginfo_t getSignalInfo();
+    dwarf::taddr reg (unsigned regnum) override;
+    dwarf::taddr pc() override;
+    dwarf::taddr deref_size (dwarf::taddr address, unsigned int size) override;
 private :
 
+    pid_t _processId;
+    Register _register;
 
 };
 

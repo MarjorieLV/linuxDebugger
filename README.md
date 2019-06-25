@@ -1,4 +1,4 @@
-Linux debbuger for linux x86
+Linux debugger for linux x86
 
 ## Caution
 Some commands will not work outsite of program file

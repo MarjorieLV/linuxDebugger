@@ -10,12 +10,14 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include "linenoise.h"
+#include "dwarf++.hh"
 #include "debugger.hpp"
 #include "registers.hpp"
 #include "breakpoint.hpp"
 
 Debugger::Debugger (std::string const & pName, pid_t pId)
-    :_programName(pName),
+    :_ptrace(pId, _register),
+     _programName(pName),
      _processId(pId)
 {
     int fd = open(_programName.c_str(), O_RDONLY);
@@ -49,6 +51,7 @@ void Debugger::_handleCommand(char* l)
     std::string line(l);
     std::vector<std::string> args;
     boost::split(args, line, boost::is_any_of(" "));
+
     CMD cmd = _isCmd(args[0]);
 
     if(cmd == CMD::CONTINUE) {
@@ -72,8 +75,17 @@ void Debugger::_handleCommand(char* l)
     else if (cmd == CMD::FINISH) {
         _stepOut();
     }
+    else if (cmd == CMD::SYMBOL) {
+        _handleSymbol(args);
+    }
+    else if (cmd == CMD::BACKTRACE) {
+        _printBacktrace();
+    }
+    else if (cmd == CMD::VARIABLES) {
+        _readVariables();
+    }
     else if (cmd == CMD::UNKNOWN){
-     std::cerr << "unknown command" << std::endl;
+     std::cout << "unknown command" << std::endl;
     }
 }
 
@@ -150,12 +162,20 @@ void Debugger::_handleBreakCommand(std::vector<std::string> args)
 {
     // std::cout << "in break command\n";
     if (args.size() > 1) {
-        std::string strAdress = args[1];
-        if (strAdress.compare(0, 2, "0x") == 0) {
+        if (args[1].compare(0, 2, "0x") == 0){
+            std::string strAdress = args[1];
             strAdress = strAdress.substr(2);
+            std::intptr_t address = std::stol(strAdress, 0, 16);
+            _setBreakpoint(address);
         }
-        std::intptr_t address = std::stol(strAdress, 0, 16);
-        _setBreakpoint(address);
+        else if (args[1].find(':') != std::string::npos) {
+            std::vector<std::string> data;
+            boost::split(data, args[1], boost::is_any_of(":"));
+            _setBreakpointAtSourceLine(data[0],std::stoi(data[1]));
+        }
+        else {
+            _setBreakpointAtFunc(args[1]);
+        }
     }
     else {
         std::cerr << "error, missing address for breakpoint\n";
@@ -176,7 +196,7 @@ void Debugger::_continueExec()
 {
     // std::cout << "in continueExec \n";
     _handleBreakpoint();
-    if (_ptrace.continueExec(_processId)) {
+    if (_ptrace.continueExec()) {
         _waitForSignal();
     }
 }
@@ -184,8 +204,12 @@ void Debugger::_continueExec()
 void Debugger::_setBreakpoint(std::intptr_t address)
 {
     // std::cout << "in isCmd\n";
-    Breakpoint bp(_processId, address, _ptrace);
-    bp.enable();
+    Breakpoint bp(address, _ptrace);
+    if (!bp.enable()) {
+
+        std::cout << "FAILED : Num of breakpoint set : " << _breakpointsByAddress.size() << std::endl;
+        return ;
+    }
     _breakpointsByAddress.emplace(address, std::move(bp));
     std::cout << "Number of breakpoint set : " << _breakpointsByAddress.size() << std::endl;
 }
@@ -205,17 +229,16 @@ void Debugger::_dumpRegisters()
 uint64_t Debugger::_readMemory(uint64_t address)
 {
     // std::cout << "in readMemory\n";
-    return _ptrace.getData(_processId, address);
+    return _ptrace.getData(address);
 }
 void Debugger::_writeMemory(uint64_t address, uint64_t value)
 {
     // std::cout << "in writeMemory\n";
-    _ptrace.setData(_processId, address, value);
+    _ptrace.setData(address, value);
 }
 
 uint64_t Debugger::_getPc()
 {
-    // std::cout << "in getPc\n";
     return _register.getRegisterValue(_processId, REGTYPE::rip);
 }
 
@@ -227,7 +250,7 @@ void Debugger::_setPc(uint64_t pc)
 
 void Debugger::_handleBreakpoint()
 {
-    // std::cout << "in handle Breakpoint\n";
+    std::cout << "in handle Breakpoint\n";
     auto it = _breakpointsByAddress.find(_getPc());
     if (it == _breakpointsByAddress.end()) {
         return;
@@ -236,7 +259,7 @@ void Debugger::_handleBreakpoint()
     Breakpoint & breakpoint = it->second;
     if (breakpoint.isEnabled()) {
         breakpoint.disable();
-        if (_ptrace.singleStep(_processId)) {
+        if (_ptrace.singleStep()) {
             _waitForSignal();
             breakpoint.enable();
         }
@@ -250,7 +273,7 @@ void Debugger::_waitForSignal()
     int options = 0;
     waitpid(_processId, &waitStatus, options);
 
-    siginfo_t siginfo = _ptrace.getSignalInfo(_processId);
+    siginfo_t siginfo = _ptrace.getSignalInfo();
 
     if (siginfo.si_signo == SIGTRAP) {
         _handleSigtrap(siginfo);
@@ -267,12 +290,18 @@ void Debugger::_waitForSignal()
 dwarf::die Debugger::_getFuncFromPC(uint64_t pc)
 {
     uint64_t pcEnd = pc & 0xfff;
-    for (auto &compUnit : _dwarf.compilation_units()) {
+    for (const dwarf::compilation_unit &compUnit : _dwarf.compilation_units()) {
         if (die_pc_range(compUnit.root()).contains(pcEnd)) {
-            for (const auto& die : compUnit.root()) {
+            for (const dwarf::die& die : compUnit.root()) {
                 if (die.tag == dwarf::DW_TAG::subprogram) {
-                    if (die_pc_range(die).contains(pcEnd)) {
-                        return die;
+                    try {
+                        dwarf::rangelist const & range = die_pc_range(die);
+                        if (range.contains(pcEnd)) {
+                            return die;
+                        }
+                    }
+                    catch (const std::exception& e) {
+                        std::cerr << "ERROR : " <<  e.what() << std::endl;
                     }
                 }
             }
@@ -284,10 +313,10 @@ dwarf::die Debugger::_getFuncFromPC(uint64_t pc)
 
 dwarf::line_table::iterator Debugger::_getLineEntryFromPc(uint64_t pc) {
     uint64_t pcEnd = pc & 0xfff;
-    for (auto &compUnit : _dwarf.compilation_units()) {
+    for (const dwarf::compilation_unit &compUnit : _dwarf.compilation_units()) {
         if (die_pc_range(compUnit.root()).contains(pcEnd)) {
-            auto &lineTable = compUnit.get_line_table();
-            auto it = lineTable.find_address(pcEnd);
+            dwarf::line_table const &lineTable = compUnit.get_line_table();
+            dwarf::line_table::iterator it = lineTable.find_address(pcEnd);
             if (it == lineTable.end()) {
                 throw std::out_of_range{"Cannot find line entry"};
             }
@@ -358,7 +387,7 @@ void Debugger::_handleSigtrap(siginfo_t info)
 
 void Debugger::_singleStep()
 {
-    _ptrace.singleStep(_processId);
+    _ptrace.singleStep();
     _waitForSignal();
 }
 
@@ -376,7 +405,7 @@ void Debugger::_singleStepWithBreakpointCheck()
 void Debugger::_stepOut()
 {
     uint64_t framePtr = _register.getRegisterValue(_processId, REGTYPE::rbp);
-    uint64_t returnAdd = _readMemory(framePtr + retAddOffset);
+    uint64_t returnAdd = _readMemory(framePtr + _retAddOffset);
 
     bool removeBreakpoint = false;
     if (_breakpointsByAddress.find(returnAdd) == _breakpointsByAddress.end()) {
@@ -405,13 +434,14 @@ void Debugger::_removeBreakpoint(std::intptr_t address)
 
 void Debugger::_stepIn()
 {
-    auto line = _getLineEntryFromPc(_getPc())->line;
+
+    unsigned int const line = _getLineEntryFromPc(_getPc())->line;
 
     while (_getLineEntryFromPc(_getPc())->line == line) {
         _singleStepWithBreakpointCheck();
     }
 
-    auto lineEntry = _getLineEntryFromPc(_getPc());
+    dwarf::line_table::iterator lineEntry = _getLineEntryFromPc(_getPc());
     _printSource(lineEntry->file->path,lineEntry->line);
 }
 
@@ -421,8 +451,8 @@ void Debugger::_stepOver()
     uint64_t funcStart = at_low_pc(func);
     uint64_t funcEnd = at_high_pc(func);
 
-    auto lineEntry = _getLineEntryFromPc(funcStart);
-    auto startLine = _getLineEntryFromPc(_getPc());
+    dwarf::line_table::iterator lineEntry = _getLineEntryFromPc(funcStart);
+    dwarf::line_table::iterator startLine = _getLineEntryFromPc(_getPc());
 
     std::vector<std::intptr_t> toDelete;
 
@@ -436,7 +466,7 @@ void Debugger::_stepOver()
     }
 
     uint64_t framePtr = _register.getRegisterValue(_processId, REGTYPE::rbp);
-    uint64_t returnAdd = _readMemory(framePtr + retAddOffset);
+    uint64_t returnAdd = _readMemory(framePtr + _retAddOffset);
     if (!_breakpointsByAddress.count(returnAdd)) {
         _setBreakpoint(returnAdd);
         toDelete.push_back(returnAdd);
@@ -445,5 +475,136 @@ void Debugger::_stepOver()
     _continueExec();
     for(std::intptr_t add : toDelete) {
         _removeBreakpoint(add);
+    }
+}
+
+void Debugger::_setBreakpointAtFunc(std::string const & name)
+{
+    for (const dwarf::compilation_unit &compUnit : _dwarf.compilation_units()) {
+        for (const dwarf::die& die : compUnit.root()) {
+            if (die.has(dwarf::DW_AT::name)
+                && at_name(die) == name) {
+                uint64_t lowPc = at_low_pc(die);
+                dwarf::line_table::iterator entry = _getLineEntryFromPc(lowPc);
+                ++entry; //skip prologue
+                _setBreakpoint(entry->address);
+            }
+        }
+    }
+}
+
+bool isSuffix(const std::string& s, const std::string& of) {
+    if (s.size() > of.size()) return false;
+    auto diff = of.size() - s.size();
+    return std::equal(s.begin(), s.end(), of.begin() + diff);
+}
+
+void Debugger::_setBreakpointAtSourceLine(std::string const & file, unsigned int line)
+{
+    for (const dwarf::compilation_unit &compUnit : _dwarf.compilation_units()) {
+        if (isSuffix(file, at_name(compUnit.root()))) {
+            dwarf::line_table const & lineTable = compUnit.get_line_table();
+            for (dwarf::line_table::entry const & entry : lineTable) {
+                if (entry.is_stmt
+                    && entry.line == line) {
+                    _setBreakpoint(entry.address);
+                    return;
+                }
+            }
+        }
+        else {
+            std::cout << "is not suffix\n";
+        }
+    }
+}
+
+std::vector<Symbol> Debugger::_findSymbols(std::string const & name)
+{
+    std::vector<Symbol> symbols;
+
+    for (elf::section const &section : _elf.sections()) {
+        if (section.get_hdr().type != elf::sht::symtab 
+            && section.get_hdr().type != elf::sht::dynsym)
+            continue;
+
+        for (elf::sym symbol : section.as_symtab()) {
+            if (symbol.get_name() == name) {
+                elf::Sym<> const &d = symbol.get_data();
+                Symbol newSymbol (d.type(), d.value);
+                symbols.push_back(newSymbol);
+            }
+        }
+    }
+
+    return symbols;
+}
+
+void Debugger::_handleSymbol(std::vector<std::string> args)
+{
+    if (args.size() < 2) {
+        std::cout << "missing arguments\n";
+        return;
+    }
+    std::vector<Symbol> symbols = _findSymbols(args[1]);
+    if (symbols.empty()) {
+        std::cerr << "Error, no symbols found\n";
+        return;
+    }
+    for (Symbol& s : symbols) {
+        std::cout << s.getName() << ", "
+                  << s.getSymbolName(s.getType()) << " at 0x"
+                  << s.getAddress() << std::endl;
+    }
+}
+
+void Debugger::_printBacktrace()
+{
+    auto outFrame = [frameNumber = 0] (auto&& func) mutable {
+        std::cout << "frame #" << frameNumber++ << ": 0x" << dwarf::at_low_pc(func)
+                  << ' ' << dwarf::at_name(func) << std::endl;
+    };
+
+    auto currFunc = _getFuncFromPC(_getPc());
+    outFrame(currFunc);
+
+    auto framPtr = _register.getRegisterValue(_processId, REGTYPE::rbp);
+    auto retAdd = _readMemory(framPtr + _retAddOffset);
+
+    while (dwarf::at_name(currFunc) != "main") {
+        currFunc = _getFuncFromPC(retAdd);
+        outFrame(currFunc);
+        framPtr = _readMemory(framPtr);
+        retAdd = _readMemory(framPtr+8);
+    }
+}
+
+void Debugger::_readVariables() {
+    dwarf::die func = _getFuncFromPC(_getPc());
+    for (const dwarf::die& die : func) {
+        if (die.tag == dwarf::DW_TAG::variable) {
+            dwarf::value locVal = die[dwarf::DW_AT::location];
+            //only supports exprlocs for now
+            if (locVal.get_type() == dwarf::value::type::exprloc) {
+                dwarf::expr_result result = locVal.as_exprloc().evaluate(&_ptrace);
+                if (result.location_type == dwarf::expr_result::type::address) {
+                    uint64_t value = _readMemory(result.value);
+                    std::cout << at_name(die)
+                              << " (0x" << std::hex << result.value
+                              << ") = " << value << std::endl;
+                }
+                if (result.location_type == dwarf::expr_result::type::reg) {
+                    uint64_t value = _register.getRegisterValueFromDwarfReg(_processId, result.value);
+                    std::cout << at_name(die)
+                              << " (reg " << result.value
+                              << ") = " << value << std::endl;
+                }
+                else {
+                    throw std::runtime_error{"Unhandled variable location"};
+                }
+            }
+            else {
+                throw std::runtime_error{"Unhandled variable location"};
+            }
+        }
     }
 }

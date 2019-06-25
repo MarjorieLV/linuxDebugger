@@ -11,9 +11,9 @@
 class Breakpoint {
 public :
 
-    Breakpoint (pid_t pId, std::intptr_t ad, Ptrace & pt);
+    Breakpoint (std::intptr_t ad, Ptrace & pt);
 
-    void enable();
+    bool enable();
     void disable();
 
     bool isEnabled() const;
@@ -23,7 +23,6 @@ private :
 
     Ptrace & _ptrace;
     bool          _enabled = false;
-    pid_t         _processId;
     std::intptr_t _address;
     uint8_t       _savedData;
     static uint8_t const _int3 = 0xcc;
