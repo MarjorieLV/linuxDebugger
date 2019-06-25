@@ -5,10 +5,12 @@ Some commands will not work outsite of program file
 
 ## To build
 cmake .
+
 make
 
 ## To launch
 ./linbug.exe <fileName>
+    
 ./linbug.exe program.exe
 
 ## Commands
